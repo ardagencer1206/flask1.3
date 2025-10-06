@@ -4,3 +4,4 @@ pyomo[appsi]==6.7.3
 numpy<2.0
 openai>=1.40.0
 werkzeug>=3.0.0
+highspy==1.8.1
