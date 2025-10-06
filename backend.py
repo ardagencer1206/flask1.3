@@ -12,31 +12,37 @@ from pyomo.environ import (
     ConcreteModel, Set, Param, Var, Binary, NonNegativeReals, Objective, minimize,
     Constraint, Any as PyAny, value, SolverFactory
 )
-from pyomo.opt import TerminationCondition
 from pathlib import Path
 
-from openai import AzureOpenAI
+# OpenAI SDK korumalı import
+try:
+    from openai import AzureOpenAI  # requires openai>=1.40.0
+except Exception:
+    AzureOpenAI = None
 
 # Dataset yolu (env ile özelleştirilebilir)
 DATASET_PATH = Path(os.environ.get("DATASET_PATH", str(Path(__file__).parent / "dataset.json")))
 
-MAX_SOLVE_SECONDS = 26  # işlemciye verdiğimiz süre
+MAX_SOLVE_SECONDS = 26
 app = Flask(__name__, static_url_path="", static_folder=".")
 app.config["MAX_CONTENT_LENGTH"] = 12 * 1024 * 1024  # 12MB görsel limiti
 
 # ---------------- Azure OpenAI Ayarları ----------------
-AZURE_OPENAI_API_KEY = os.environ.get("AZURE_OPENAI_API_KEY", "d0167637046c4443badc4920cc612abb")
-AZURE_OPENAI_ENDPOINT = os.environ.get("AZURE_OPENAI_ENDPOINT", "https://openai-fnss.openai.azure.com")
+AZURE_OPENAI_API_KEY = os.environ.get("AZURE_OPENAI_API_KEY", "")
+AZURE_OPENAI_ENDPOINT = os.environ.get("AZURE_OPENAI_ENDPOINT", "")
 AZURE_DEPLOYMENT_NAME = os.environ.get("AZURE_DEPLOYMENT_NAME", "gpt-4o")
 AZURE_OPENAI_API_VERSION = os.environ.get("AZURE_OPENAI_API_VERSION", "2024-06-01")
 
-try:
-    aoai_client = AzureOpenAI(
-        api_key=AZURE_OPENAI_API_KEY,
-        api_version=AZURE_OPENAI_API_VERSION,
-        azure_endpoint=AZURE_OPENAI_ENDPOINT
-    )
-except Exception:
+if AzureOpenAI is not None and AZURE_OPENAI_API_KEY and AZURE_OPENAI_ENDPOINT:
+    try:
+        aoai_client = AzureOpenAI(
+            api_key=AZURE_OPENAI_API_KEY,
+            api_version=AZURE_OPENAI_API_VERSION,
+            azure_endpoint=AZURE_OPENAI_ENDPOINT
+        )
+    except Exception:
+        aoai_client = None
+else:
     aoai_client = None
 # -------------------------------------------------------
 
@@ -52,13 +58,9 @@ def safe_float(x, default=0.0):
 
 
 def load_dataset_from_file() -> Dict[str, Any]:
-    """
-    dataset.json dosyasını okur ve dict döner.
-    """
     try:
         with open(DATASET_PATH, "r", encoding="utf-8") as f:
             data = json.load(f)
-        # minimum alan kontrolü
         required = [
             "cities", "main_depot", "periods", "vehicle_types",
             "vehicle_count", "distances", "packages", "minutil_penalty"
@@ -79,22 +81,13 @@ def _normalize_initial_locations(
     main_depot: str,
     payload: Dict[str, Any]
 ) -> Dict[str, str]:
-    """
-    vehicle_initial_locations aşağıdaki iki formdan birini alabilir:
-      A) { "Küçük_1": "Ankara", "Orta_1": "İzmir", ... }  # doğrudan araç adına göre
-      B) { "Küçük": "Ankara", "Orta": "İzmir" }           # tipe göre, o tipteki tüm araçlara uygular
-    Verilmezse tüm araçlar main_depot'ta başlatılır.
-    Şehir doğrulaması yapar; hatalı şehirler sessizce main_depot'a döner.
-    """
     raw = payload.get("vehicle_initial_locations", {}) or {}
     init = {v: main_depot for v in vehicles}
 
     if isinstance(raw, dict):
-        # araç adına göre eşleşenler
         for k, city in raw.items():
             if k in vehicles and city in cities:
                 init[k] = city
-        # tip adına göre eşleşenler
         for k, city in raw.items():
             if k not in vehicles and city in cities:
                 prefix = f"{k}_"
@@ -102,7 +95,6 @@ def _normalize_initial_locations(
                     if v.startswith(prefix):
                         init[v] = city
 
-    # son güvenlik
     for v in vehicles:
         if init.get(v) not in cities:
             init[v] = main_depot
@@ -111,12 +103,7 @@ def _normalize_initial_locations(
 
 
 def pick_solver():
-    """
-    Önce Pyomo APPsi-HiGHS (highspy) denenir.
-    Ardından klasik arayüzler (highs/cbc/glpk/cplex).
-    Geriye (solver_adı, solver_nesnesi, is_appsi_bool) döner.
-    """
-    # 1) APPsi-HiGHS (Python wrapper)
+    # 1) APPsi-HiGHS
     try:
         from pyomo.contrib.appsi.solvers.highs import Highs as AppsiHighs
         s = AppsiHighs()
@@ -157,13 +144,6 @@ def pick_solver():
 # Model Kurulumu
 # ------------------------------
 def build_model(payload: Dict[str, Any]) -> Tuple[ConcreteModel, Dict[str, Any]]:
-    """
-    Beklenen payload anahtarları:
-      cities, main_depot, periods, vehicle_types, vehicle_count,
-      distances, packages, minutil_penalty
-      (opsiyonel) vehicle_initial_locations
-    """
-    # --- Girdiler
     cities: List[str] = payload["cities"]
     main_depot: str = payload["main_depot"]
     periods: int = int(payload["periods"])
@@ -173,13 +153,9 @@ def build_model(payload: Dict[str, Any]) -> Tuple[ConcreteModel, Dict[str, Any]]
     vehicle_types: Dict[str, Dict[str, Any]] = payload["vehicle_types"]
     vehicle_count: Dict[str, int] = payload["vehicle_count"]
 
-    # Araç isimleri: Tip_index
     vehicles: List[str] = [f"{vt}_{i}" for vt, cnt in vehicle_count.items() for i in range(1, int(cnt) + 1)]
-
-    # Başlangıç konumları
     init_loc = _normalize_initial_locations(vehicles, cities, main_depot, payload)
 
-    # Mesafeler (simetrik tamamla)
     distances: Dict[Tuple[str, str], float] = {}
     for i, j, d in payload["distances"]:
         distances[(i, j)] = float(d)
@@ -187,7 +163,6 @@ def build_model(payload: Dict[str, Any]) -> Tuple[ConcreteModel, Dict[str, Any]]
     for c in cities:
         distances[(c, c)] = 0.0
 
-    # Paketler
     packages_input: List[Dict[str, Any]] = payload["packages"]
     packages = {}
     for rec in packages_input:
@@ -203,19 +178,16 @@ def build_model(payload: Dict[str, Any]) -> Tuple[ConcreteModel, Dict[str, Any]]
 
     MINUTIL_PENALTY = safe_float(payload.get("minutil_penalty", 10.0), 10.0)
 
-    # --- Pyomo Modeli
     model = ConcreteModel()
 
-    # Kümeler
     model.Cities = Set(initialize=cities)
     model.Periods = Set(initialize=periods_list)
     model.Vehicles = Set(initialize=vehicles)
     model.Packages = Set(initialize=list(packages.keys()))
 
-    def vtype(v):  # "Küçük_1" -> "Küçük"
+    def vtype(v):
         return v.rsplit("_", 1)[0]
 
-    # Parametreler
     model.Distance = Param(model.Cities, model.Cities, initialize=lambda m, i, j: distances[(i, j)])
     model.VehicleCapacity = Param(model.Vehicles, initialize=lambda m, v: vehicle_types[vtype(v)]["kapasite"])
     model.TransportCost = Param(model.Vehicles, initialize=lambda m, v: vehicle_types[vtype(v)]["maliyet_km"])
@@ -229,16 +201,14 @@ def build_model(payload: Dict[str, Any]) -> Tuple[ConcreteModel, Dict[str, Any]]
     model.PackageDeadline = Param(model.Packages, initialize=lambda m, p: packages[p]["teslim_suresi"])
     model.LatePenalty = Param(model.Packages, initialize=lambda m, p: packages[p]["ceza_maliyeti"])
 
-    # Değişkenler
-    model.x = Var(model.Vehicles, model.Cities, model.Cities, model.Periods, domain=Binary)  # araç hareketi
-    model.y = Var(model.Packages, model.Vehicles, model.Cities, model.Cities, model.Periods, domain=Binary)  # paket hareketi
-    model.z = Var(model.Vehicles, model.Periods, domain=Binary)  # araç kullanımı
-    model.loc = Var(model.Vehicles, model.Cities, model.Periods, domain=Binary)  # araç konumu
-    model.pkg_loc = Var(model.Packages, model.Cities, model.Periods, domain=Binary)  # paket konumu
-    model.lateness = Var(model.Packages, domain=NonNegativeReals)  # gecikme
-    model.minutil_shortfall = Var(model.Vehicles, model.Periods, domain=NonNegativeReals)  # doluluk açığı (kg)
+    model.x = Var(model.Vehicles, model.Cities, model.Cities, model.Periods, domain=Binary)
+    model.y = Var(model.Packages, model.Vehicles, model.Cities, model.Cities, model.Periods, domain=Binary)
+    model.z = Var(model.Vehicles, model.Periods, domain=Binary)
+    model.loc = Var(model.Vehicles, model.Cities, model.Periods, domain=Binary)
+    model.pkg_loc = Var(model.Packages, model.Cities, model.Periods, domain=Binary)
+    model.lateness = Var(model.Packages, domain=NonNegativeReals)
+    model.minutil_shortfall = Var(model.Vehicles, model.Periods, domain=NonNegativeReals)
 
-    # Amaç
     def objective_rule(m):
         transport = sum(
             m.TransportCost[v] * m.Distance[i, j] * m.x[v, i, j, t]
@@ -251,23 +221,16 @@ def build_model(payload: Dict[str, Any]) -> Tuple[ConcreteModel, Dict[str, Any]]
 
     model.obj = Objective(rule=objective_rule, sense=minimize)
 
-    # ------------------------------
-    # KISITLAR (1..21)
-    # ------------------------------
-
-    # 1) Paket origin'den tam 1 çıkış (ready'den sonra)
     def package_origin_rule(m, p):
         o, r = m.PackageOrigin[p], m.PackageReady[p]
         return sum(m.y[p, v, o, j, t] for v in m.Vehicles for j in m.Cities for t in m.Periods if j != o and t >= r) == 1
     model.package_origin_constraint = Constraint(model.Packages, rule=package_origin_rule)
 
-    # 2) Paket hedefe tam 1 varış
     def package_destination_rule(m, p):
         d = m.PackageDest[p]
         return sum(m.y[p, v, i, d, t] for v in m.Vehicles for i in m.Cities for t in m.Periods if i != d) == 1
     model.package_destination_constraint = Constraint(model.Packages, rule=package_destination_rule)
 
-    # 3) Ana depodan en az bir kez geçiş (origin/dest depo değilse)
     def main_depot_rule(m, p):
         o, d = m.PackageOrigin[p], m.PackageDest[p]
         if o == main_depot or d == main_depot:
@@ -277,34 +240,29 @@ def build_model(payload: Dict[str, Any]) -> Tuple[ConcreteModel, Dict[str, Any]]
         return through >= 1
     model.main_depot_constraint = Constraint(model.Packages, rule=main_depot_rule)
 
-    # 4) Paket ancak araç gidiyorsa taşınır
     def y_le_x_rule(m, p, v, i, j, t):
         if i == j:
             return Constraint.Skip
         return m.y[p, v, i, j, t] <= m.x[v, i, j, t]
     model.package_vehicle_link = Constraint(model.Packages, model.Vehicles, model.Cities, model.Cities, model.Periods, rule=y_le_x_rule)
 
-    # 5) Kapasite
     def capacity_rule(m, v, i, j, t):
         if i == j:
             return Constraint.Skip
         return sum(m.PackageWeight[p] * m.y[p, v, i, j, t] for p in m.Packages) <= m.VehicleCapacity[v]
     model.capacity_constraint = Constraint(model.Vehicles, model.Cities, model.Cities, model.Periods, rule=capacity_rule)
 
-    # 6) SOFT min. doluluk (sadece ana depodan çıkış)
     def min_utilization_soft_rule(m, v, t):
-        departures = sum(m.x[v, main_depot, j, t] for j in m.Cities if j != main_depot)  # 0/1
+        departures = sum(m.x[v, main_depot, j, t] for j in m.Cities if j != main_depot)
         loaded = sum(m.PackageWeight[p] * m.y[p, v, main_depot, j, t] for p in m.Packages for j in m.Cities if j != main_depot)
         target = m.MinUtilization[v] * m.VehicleCapacity[v] * departures
         return loaded + m.minutil_shortfall[v, t] >= target
     model.min_utilization_soft = Constraint(model.Vehicles, model.Periods, rule=min_utilization_soft_rule)
 
-    # 7) Paket konumu: her t’de tek şehir
     def pkg_onehot_rule(m, p, t):
         return sum(m.pkg_loc[p, n, t] for n in m.Cities) == 1
     model.pkg_location_onehot = Constraint(model.Packages, model.Periods, rule=pkg_onehot_rule)
 
-    # 8) Ready öncesi origin kilidi ve t=ready’de origin
     def pkg_before_ready_origin_rule(m, p, t):
         o, r = m.PackageOrigin[p], m.PackageReady[p]
         if t < r:
@@ -331,28 +289,24 @@ def build_model(payload: Dict[str, Any]) -> Tuple[ConcreteModel, Dict[str, Any]]
         return Constraint.Skip
     model.pkg_at_ready_others_zero = Constraint(model.Packages, model.Cities, rule=pkg_at_ready_others_zero_rule)
 
-    # 9) Paket konum geçişi (τ=1)
     def pkg_loc_transition_rule(m, p, n, t):
-        if t == Tmax:
+        if t == periods:
             return Constraint.Skip
         incoming = sum(m.y[p, v, i, n, t] for v in m.Vehicles for i in m.Cities if i != n)
         outgoing = sum(m.y[p, v, n, j, t] for v in m.Vehicles for j in m.Cities if j != n)
         return m.pkg_loc[p, n, t] + incoming - outgoing == m.pkg_loc[p, n, t + 1]
     model.pkg_location_transition = Constraint(model.Packages, model.Cities, model.Periods, rule=pkg_loc_transition_rule)
 
-    # 10) Çıkış mümkünse o anda orada ol
     def pkg_departure_feasible_rule(m, p, i, t):
         return sum(m.y[p, v, i, j, t] for v in m.Vehicles for j in m.Cities if j != i) <= m.pkg_loc[p, i, t]
     model.pkg_departure_feasible = Constraint(model.Packages, model.Cities, model.Periods, rule=pkg_departure_feasible_rule)
 
-    # 11) Varıştan sonra t+1’de hedef şehirde ol (τ=1)
     def pkg_arrival_feasible_rule(m, p, j, t):
-        if t == Tmax:
+        if t == periods:
             return Constraint.Skip
         return sum(m.y[p, v, i, j, t] for v in m.Vehicles for i in m.Cities if i != j) <= m.pkg_loc[p, j, t + 1]
     model.pkg_arrival_feasible = Constraint(model.Packages, model.Cities, model.Periods, rule=pkg_arrival_feasible_rule)
 
-    # 12) Ara şehir akış korunumu
     def flow_conservation_rule(m, p, k):
         o, d = m.PackageOrigin[p], m.PackageDest[p]
         if k == o or k == d:
@@ -362,43 +316,36 @@ def build_model(payload: Dict[str, Any]) -> Tuple[ConcreteModel, Dict[str, Any]]
         return inflow == outflow
     model.flow_conservation = Constraint(model.Packages, model.Cities, rule=flow_conservation_rule)
 
-    # 13) Araç kullanım takibi (hareket varsa z=1)
     def vehicle_usage_rule(m, v, t):
         moves = sum(m.x[v, i, j, t] for i in m.Cities for j in m.Cities if i != j)
         return m.z[v, t] >= moves
     model.vehicle_usage = Constraint(model.Vehicles, model.Periods, rule=vehicle_usage_rule)
 
-    # 14) Araç: periyot başına tek hareket
     def vehicle_one_move_rule(m, v, t):
         return sum(m.x[v, i, j, t] for i in m.Cities for j in m.Cities if i != j) <= 1
     model.vehicle_route_out = Constraint(model.Vehicles, model.Periods, rule=vehicle_one_move_rule)
 
-    # 15) Araç başlangıç konumu (t=Tmin’de araç özelinde belirlenen şehirde)
     def vehicle_initial_loc_rule(m, v):
-        return m.loc[v, init_loc[v], Tmin] == 1
+        return m.loc[v, init_loc[v], 1] == 1
     model.vehicle_initial_location = Constraint(model.Vehicles, rule=vehicle_initial_loc_rule)
 
-    # 16) Araç: her t’de tek şehir
     def vehicle_loc_onehot_rule(m, v, t):
         return sum(m.loc[v, n, t] for n in m.Cities) == 1
     model.vehicle_location_exists = Constraint(model.Vehicles, model.Periods, rule=vehicle_loc_onehot_rule)
 
-    # 17) Araç konum geçişi (τ=1)
     def vehicle_loc_transition_rule(m, v, n, t):
-        if t == Tmax:
+        if t == periods:
             return Constraint.Skip
         incoming = sum(m.x[v, i, n, t] for i in m.Cities if i != n)
         outgoing = sum(m.x[v, n, j, t] for j in m.Cities if j != n)
         return m.loc[v, n, t] + incoming - outgoing == m.loc[v, n, t + 1]
     model.vehicle_location_transition = Constraint(model.Vehicles, model.Cities, model.Periods, rule=vehicle_loc_transition_rule)
 
-    # 18) Araç sadece bulunduğu şehirden ayrılabilir
     def vehicle_move_from_loc_rule(m, v, i, t):
         outgoing = sum(m.x[v, i, j, t] for j in m.Cities if j != i)
         return outgoing <= m.loc[v, i, t]
     model.movement_from_location = Constraint(model.Vehicles, model.Cities, model.Periods, rule=vehicle_move_from_loc_rule)
 
-    # 19) Gecikme tanımı (teslim zamanı - termin ≤ lateness)
     def lateness_rule(m, p):
         d = m.PackageDest[p]
         delivery_t = sum(tt * m.y[p, v, i, d, tt] for v in m.Vehicles for i in m.Cities for tt in m.Periods if i != d)
@@ -406,21 +353,18 @@ def build_model(payload: Dict[str, Any]) -> Tuple[ConcreteModel, Dict[str, Any]]
         return m.lateness[p] >= delivery_t - deadline
     model.lateness_calc = Constraint(model.Packages, rule=lateness_rule)
 
-    # 20) Aynı paket aynı i→j segmentini toplamda ≤1
     def package_once_segment_rule(m, p, i, j):
         if i == j:
             return Constraint.Skip
         return sum(m.y[p, v, i, j, t] for v in m.Vehicles for t in m.Periods) <= 1
     model.package_once_per_segment = Constraint(model.Packages, model.Cities, model.Cities, rule=package_once_segment_rule)
 
-    # 21) Hazır olmadan origin'den çıkamaz
     def package_ready_time_rule(m, p, v, i, j, t):
         if i == j or i != m.PackageOrigin[p]:
             return Constraint.Skip
         return m.y[p, v, i, j, t] * t >= m.y[p, v, i, j, t] * m.PackageReady[p]
     model.package_ready_time = Constraint(model.Packages, model.Vehicles, model.Cities, model.Cities, model.Periods, rule=package_ready_time_rule)
 
-    # meta
     meta = {
         "cities": cities,
         "periods_list": periods_list,
@@ -450,7 +394,6 @@ def extract_results(model: ConcreteModel, meta: Dict[str, Any]) -> Dict[str, Any
     total_obj = float(value(model.obj))
     results["objective"] = total_obj
 
-    # Maliyet dağılımı
     transport_cost = 0.0
     for v in vehicles:
         for i in cities:
@@ -475,7 +418,6 @@ def extract_results(model: ConcreteModel, meta: Dict[str, Any]) -> Dict[str, Any
         "min_util_gap": float(minutil_pen),
     }
 
-    # Araç rotaları
     vehicle_routes = []
     for v in sorted(vehicles):
         entries = []
@@ -498,7 +440,6 @@ def extract_results(model: ConcreteModel, meta: Dict[str, Any]) -> Dict[str, Any
             vehicle_routes.append({"vehicle": v, "capacity": float(value(model.VehicleCapacity[v])), "legs": entries})
     results["vehicle_routes"] = vehicle_routes
 
-    # Paketler
     package_summaries = []
     for p in sorted(packages.keys()):
         o = packages[p]["baslangic"]
@@ -583,6 +524,7 @@ def _build_vision_messages(img_b64: str, cities_ctx: Optional[List[str]]) -> Lis
         ]}
     ]
 
+
 def _parse_vision_json(obj: Dict[str, Any]) -> List[Dict[str, Any]]:
     pkgs = obj.get("packages") or []
     out: List[Dict[str, Any]] = []
@@ -615,7 +557,6 @@ def vision_package_extract():
         if "image" not in request.files:
             return jsonify({"ok": False, "error": "image dosyası gerekli"}), 400
 
-        # bağlamdan şehirleri al (opsiyonel)
         cities_ctx: Optional[List[str]] = None
         if "context" in request.files:
             try:
@@ -632,7 +573,7 @@ def vision_package_extract():
             model=AZURE_DEPLOYMENT_NAME,
             messages=messages,
             temperature=0.0,
-            max_tokens=400
+            max_tokens=400,
             response_format={"type": "json_object"}  # JSON zorlaması
         )
         raw = completion.choices[0].message.content or "{}"
@@ -664,11 +605,6 @@ def root():
 
 @app.route("/dataset", methods=["GET", "PUT", "POST"])
 def dataset_endpoint():
-    """
-    GET  -> dataset.json'u oku ve döndür
-    PUT  -> gelen JSON'u doğrula ve dataset.json'a yaz
-    POST -> bazı ortamlarda PUT engelli olabilir; POST'u PUT gibi kullan
-    """
     try:
         if request.method == "GET":
             if not DATASET_PATH.exists():
@@ -677,13 +613,11 @@ def dataset_endpoint():
                 data = json.load(f)
             return jsonify({"ok": True, "dataset": data})
 
-        # PUT veya POST -> kaydet
         try:
             payload = request.get_json(force=True)
         except Exception as e:
             return jsonify({"ok": False, "error": f"Geçersiz JSON: {e}"}), 400
 
-        # Basit şema kontrolü
         required_keys = [
             "cities", "main_depot", "periods",
             "vehicle_types", "vehicle_count",
@@ -693,7 +627,6 @@ def dataset_endpoint():
         if missing:
             return jsonify({"ok": False, "error": f"Eksik alanlar: {', '.join(missing)}"}), 400
 
-        # Dosyaya yaz (atomic)
         tmp_path = DATASET_PATH.with_suffix(".json.tmp")
         with open(tmp_path, "w", encoding="utf-8") as f:
             json.dump(payload, f, ensure_ascii=False, indent=2)
@@ -707,10 +640,6 @@ def dataset_endpoint():
 
 @app.route("/chat", methods=["POST"])
 def chat():
-    """
-    Önizleme/forma girilen JSON parametrelerini 'context' olarak alır,
-    'messages' listesindeki sohbet geçmişiyle birlikte Azure OpenAI'ye gönderir.
-    """
     try:
         if aoai_client is None:
             return jsonify({"ok": False, "error": "Azure OpenAI istemcisi oluşturulamadı (anahtar/endpoint)."}), 500
@@ -763,7 +692,6 @@ def handle_500(e):
 @app.route("/solve", methods=["POST"])
 def solve():
     try:
-        # Önce gelen payload'ı dene; yoksa dataset.json'u yükle
         data = request.get_json(silent=True) or {}
         if not data:
             data = load_dataset_from_file()
@@ -774,7 +702,6 @@ def solve():
         if solver is None:
             return jsonify({"ok": False, "error": "Uygun MILP çözücüsü bulunamadı."}), 400
 
-        # --- ÇÖZ ---
         if is_appsi:
             results = solver.solve(model)
             term = getattr(results, "termination_condition", None)
@@ -789,7 +716,6 @@ def solve():
             else:
                 term = getattr(results, "termination_condition", None)
 
-        # --- İnkümbent var mı? ---
         def has_incumbent(m):
             try:
                 for _, v in m.x.items():
@@ -822,6 +748,4 @@ def solve():
 
 
 if __name__ == "__main__":
-    # Lokal test için:
     app.run(host="0.0.0.0", port=5000, debug=True)
-
