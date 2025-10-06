@@ -1,8 +1,6 @@
 flask==3.0.3
 gunicorn==21.2.0
 pyomo[appsi]==6.7.3
-highspy==1.8.1
 numpy<2.0
-openai>=1.30.0
-werkzeug
-
+openai>=1.40.0
+werkzeug>=3.0.0
