@@ -26,6 +26,8 @@
     .btn-ghost{ background: transparent; border: 1px solid var(--bs-border-color); }
     .btn-ghost:hover{ background: color-mix(in oklab, var(--bs-primary) 10%, transparent); }
     .footnote{ font-size: .875rem; color: var(--bs-secondary-color); }
+    .sr-only{ position:absolute; width:1px; height:1px; padding:0; margin:-1px; overflow:hidden; clip:rect(0,0,0,0); border:0;}
+    .form-section-title{ display:flex; align-items:center; gap:.5rem; margin-bottom:.25rem; }
   </style>
 </head>
 <body>
@@ -67,7 +69,9 @@
             </div>
 
             <div class="mb-3">
-              <label for="cities" class="form-label">Şehirler (JSON dizi)</label>
+              <div class="form-section-title">
+                <label for="cities" class="form-label mb-0">Şehirler (JSON dizi)</label>
+              </div>
               <input id="cities" class="form-control" placeholder='["İstanbul","Ankara","İzmir"]' />
               <div class="form-text">Araç başlangıç konumları bu listedeki şehirlerden seçilir.</div>
             </div>
@@ -95,7 +99,7 @@
             </div>
 
             <!-- Dinamik: Araç Başlangıç Konumları -->
-            <div class="mb-3">
+            <div class="mb-4">
               <div class="d-flex align-items-center justify-content-between">
                 <label class="form-label mb-0">Araç Başlangıç Konumları</label>
                 <div class="d-flex gap-2">
@@ -107,14 +111,54 @@
               <div class="form-text">Her aracın başlangıç şehrini seçin. Belirtilmeyenler kayıtta otomatik ana depoya çekilir.</div>
             </div>
 
+            <!-- Kullanıcı dostu Paket Formu -->
             <div class="mb-3">
-              <label for="distances" class="form-label">Mesafeler (liste; [i, j, km])</label>
-              <textarea id="distances" class="form-control" rows="5" placeholder='[["İstanbul","Ankara",450], ...]'></textarea>
+              <div class="d-flex align-items-center justify-content-between flex-wrap gap-2">
+                <div class="form-section-title mb-0">
+                  <i class="bi bi-box-seam"></i>
+                  <span class="form-label mb-0">Paketler</span>
+                </div>
+                <div class="d-flex gap-2">
+                  <button id="addPackageBtn" type="button" class="btn btn-sm btn-primary">
+                    <i class="bi bi-plus-circle me-1"></i>Paket Ekle
+                  </button>
+
+                  <!-- Fotoğraftan paket çıkarma -->
+                  <input id="photoInput" type="file" accept="image/*" capture="environment" class="d-none" />
+                  <button id="photoBtn" type="button" class="btn btn-sm btn-dark">
+                    <i class="bi bi-camera-fill me-1"></i>Fotoğraftan Ekle
+                  </button>
+                </div>
+              </div>
+
+              <div id="packagesFormWrap" class="table-responsive mt-2">
+                <table class="table table-sm table-hover align-middle mb-0">
+                  <thead class="table-light">
+                    <tr>
+                      <th style="min-width:80px">ID</th>
+                      <th style="min-width:160px">Başlangıç</th>
+                      <th style="min-width:160px">Hedef</th>
+                      <th style="min-width:120px">Ağırlık (kg)</th>
+                      <th style="min-width:120px">Ready (t)</th>
+                      <th style="min-width:140px">Termin süresi (t)</th>
+                      <th style="min-width:120px">Ceza (TL/t)</th>
+                      <th style="width:40px"></th>
+                    </tr>
+                  </thead>
+                  <tbody id="packagesTbody">
+                    <!-- Satırlar JS ile -->
+                  </tbody>
+                </table>
+                <div class="form-text mt-1">Şehirler dropdown’dan gelir. Tüm alanlar zorunludur.</div>
+              </div>
+
+              <!-- Eski JSON alanı: artık otomatik senkron. Gizli tutuyoruz ama indirme/önizleme için kullanacağız. -->
+              <textarea id="packages" class="form-control d-none" rows="7" placeholder='[{"id":"P1", ...}]'></textarea>
             </div>
 
             <div class="mb-3">
-              <label for="packages" class="form-label">Paketler (liste)</label>
-              <textarea id="packages" class="form-control" rows="7" placeholder='[{"id":"P1", ...}]'></textarea>
+              <label for="distances" class="form-label">Mesafeler (liste; [i, j, km])</label>
+              <textarea id="distances" class="form-control" rows="5" placeholder='[["İstanbul","Ankara",450], ...]'></textarea>
             </div>
 
             <div class="mb-3 col-12 col-md-6">
@@ -165,7 +209,146 @@
     return out;
   }
 
-  // Araç konumları tablosunu çiz
+  // ====== Paket Form Durumu ======
+  const pkgState = {
+    items: [] // {id, baslangic, hedef, agirlik, ready, deadline_suresi, ceza}
+  };
+
+  function getCities(){
+    try{ return JSON.parse($("cities").value)||[]; }catch(_){ return []; }
+  }
+
+  function nextPackageId(){
+    // P1..Pn şeklinde artan öneri
+    const ids = new Set(pkgState.items.map(p=>String(p.id)));
+    let i=1; while(ids.has("P"+i)) i++;
+    return "P"+i;
+  }
+
+  function pkgRowTemplate(p, cities){
+    const opts = (cities||[]).map(c=>`<option value="${c}">${c}</option>`).join("");
+    return `
+      <tr data-pid="${p.id}">
+        <td>
+          <input class="form-control form-control-sm pkg-id" value="${p.id}" aria-label="Paket ID">
+        </td>
+        <td>
+          <select class="form-select form-select-sm pkg-origin" aria-label="Başlangıç">
+            ${opts}
+          </select>
+        </td>
+        <td>
+          <select class="form-select form-select-sm pkg-dest" aria-label="Hedef">
+            ${opts}
+          </select>
+        </td>
+        <td><input type="number" step="0.01" class="form-control form-control-sm pkg-weight" value="${p.agirlik??0}" aria-label="Ağırlık"></td>
+        <td><input type="number" step="1" class="form-control form-control-sm pkg-ready" value="${p.ready??1}" aria-label="Ready"></td>
+        <td><input type="number" step="1" class="form-control form-control-sm pkg-deadline" value="${p.deadline_suresi??1}" aria-label="Termin Süresi"></td>
+        <td><input type="number" step="0.01" class="form-control form-control-sm pkg-penalty" value="${p.ceza??0}" aria-label="Ceza"></td>
+        <td class="text-end">
+          <button type="button" class="btn btn-sm btn-outline-danger pkg-remove" aria-label="Sil">
+            <i class="bi bi-trash"></i>
+          </button>
+        </td>
+      </tr>
+    `;
+  }
+
+  function renderPackageTable(){
+    const tb = $("packagesTbody");
+    if(!tb) return;
+    const cities = getCities();
+    tb.innerHTML = pkgState.items.map(p=>pkgRowTemplate(p, cities)).join("") || `<tr><td colspan="8" class="text-secondary">Paket yok. “Paket Ekle” ile ekleyin.</td></tr>`;
+    // Seçimler
+    for(const row of tb.querySelectorAll("tr[data-pid]")){
+      const pid = row.getAttribute("data-pid");
+      const item = pkgState.items.find(x=>String(x.id)===String(pid));
+      if(!item) continue;
+      const origin = row.querySelector(".pkg-origin");
+      const dest   = row.querySelector(".pkg-dest");
+      if(origin){ origin.value = item.baslangic || cities[0] || ""; }
+      if(dest){ dest.value = item.hedef || cities[0] || ""; }
+    }
+    bindPackageRowEvents();
+    syncPackagesTextarea();
+  }
+
+  function bindPackageRowEvents(){
+    const tb = $("packagesTbody");
+    if(!tb) return;
+
+    tb.querySelectorAll(".pkg-remove").forEach(btn=>{
+      btn.addEventListener("click", ()=>{
+        const tr = btn.closest("tr[data-pid]");
+        if(!tr) return;
+        const pid = tr.getAttribute("data-pid");
+        pkgState.items = pkgState.items.filter(p=>String(p.id)!==String(pid));
+        renderPackageTable();
+      });
+    });
+
+    tb.querySelectorAll("tr[data-pid]").forEach(tr=>{
+      tr.querySelectorAll("input,select").forEach(el=>{
+        el.addEventListener("input", ()=>{
+          const pid = tr.getAttribute("data-pid");
+          const item = pkgState.items.find(p=>String(p.id)===String(pid));
+          if(!item) return;
+          item.id              = tr.querySelector(".pkg-id")?.value?.trim() || item.id;
+          item.baslangic       = tr.querySelector(".pkg-origin")?.value || item.baslangic;
+          item.hedef           = tr.querySelector(".pkg-dest")?.value || item.hedef;
+          item.agirlik         = parseFloat(tr.querySelector(".pkg-weight")?.value)||0;
+          item.ready           = parseInt(tr.querySelector(".pkg-ready")?.value,10)||1;
+          item.deadline_suresi = parseInt(tr.querySelector(".pkg-deadline")?.value,10)||1;
+          item.ceza            = parseFloat(tr.querySelector(".pkg-penalty")?.value)||0;
+          // Satır data-pid ID değiştiyse güncelle
+          if(tr.getAttribute("data-pid") !== item.id){
+            tr.setAttribute("data-pid", item.id);
+          }
+          syncPackagesTextarea();
+          refreshPreview();
+        });
+      });
+    });
+  }
+
+  function addEmptyPackage(){
+    const cities = getCities();
+    pkgState.items.push({
+      id: nextPackageId(),
+      baslangic: cities[0] || "",
+      hedef: cities[1] || cities[0] || "",
+      agirlik: 0,
+      ready: 1,
+      deadline_suresi: 1,
+      ceza: 0
+    });
+    renderPackageTable();
+  }
+
+  function loadPackagesToForm(list){
+    // Beklenen liste: [{id, baslangic, hedef, agirlik, ready, deadline_suresi, ceza}]
+    const cities = new Set(getCities());
+    pkgState.items = (list||[]).map(p=>({
+      id: String(p.id),
+      baslangic: cities.has(p.baslangic) ? p.baslangic : (Array.from(cities)[0]||""),
+      hedef: cities.has(p.hedef) ? p.hedef : (Array.from(cities)[0]||""),
+      agirlik: Number(p.agirlik)||0,
+      ready: parseInt(p.ready,10)||1,
+      deadline_suresi: parseInt(p.deadline_suresi,10)||1,
+      ceza: Number(p.ceza)||0
+    }));
+    renderPackageTable();
+  }
+
+  function syncPackagesTextarea(){
+    // Form -> JSON alanı
+    const t = $("packages");
+    if(!t) return;
+    t.value = JSON.stringify(pkgState.items, null, 2);
+  }
+
+  // ====== Araç konumları tablosu ======
   function renderVehicleLocationsTable(){
     let cities=[], vcount={}, mainDepot="", existing={};
     try{ cities = JSON.parse($("cities").value); }catch(_){}
@@ -177,10 +360,8 @@
     const wrap = $("vehicleLocWrap");
     if(!wrap){ return; }
 
-    // Seçenekler
     const opts = (cities||[]).map(c=>`<option value="${c}">${c}</option>`).join("");
 
-    // Tablo
     let html = `<table class="table table-sm table-hover align-middle mb-0">
       <thead class="table-light"><tr><th style="width:40%">Araç</th><th style="width:60%">Başlangıç Şehri</th></tr></thead><tbody>`;
     if(!vehicles.length){
@@ -201,7 +382,6 @@
     html += `</tbody></table>`;
     wrap.innerHTML = html;
 
-    // Set selected values
     for(const v of vehicles){
       const sel = $("vehloc_"+v);
       if(sel){
@@ -211,7 +391,6 @@
     }
   }
 
-  // Mevcut select'lardan JSON oluştur
   function collectVehicleInitialLocations(){
     let vcount={}; try{ vcount = JSON.parse($("vehicle_count").value); }catch(_){}
     const vehicles = makeVehicleIds(vcount);
@@ -232,7 +411,8 @@
       vehicle_count: parseJSONField("vehicle_count","Araç Sayıları"),
       vehicle_initial_locations: collectVehicleInitialLocations(),
       distances: parseJSONField("distances","Mesafeler"),
-      packages: parseJSONField("packages","Paketler"),
+      // Paketleri kullanıcı dostu formdan al
+      packages: JSON.parse($("packages").value || "[]"),
       minutil_penalty: parseFloat($("minutil_penalty").value)
     };
     if(!data.main_depot) throw new Error("Ana Depo boş olamaz.");
@@ -241,6 +421,19 @@
     for(const [k,city] of Object.entries(data.vehicle_initial_locations||{})){
       if(!(data.cities||[]).includes(city)) data.vehicle_initial_locations[k] = data.main_depot;
     }
+    // Paket şehir doğrulaması
+    const citySet = new Set(data.cities||[]);
+    data.packages = (data.packages||[]).map(p=>{
+      const q = {...p};
+      if(!citySet.has(q.baslangic)) q.baslangic = data.main_depot;
+      if(!citySet.has(q.hedef))     q.hedef     = data.main_depot;
+      q.id = String(q.id||"");
+      q.agirlik = Number(q.agirlik)||0;
+      q.ready = parseInt(q.ready,10)||1;
+      q.deadline_suresi = parseInt(q.deadline_suresi,10)||1;
+      q.ceza = Number(q.ceza)||0;
+      return q;
+    });
     return data;
   }
 
@@ -261,12 +454,14 @@
       $("vehicle_types").value = JSON.stringify(data.vehicle_types ?? {}, null, 2);
       $("vehicle_count").value = JSON.stringify(data.vehicle_count ?? {}, null, 2);
       $("distances").value = JSON.stringify(data.distances ?? [], null, 2);
-      $("packages").value = JSON.stringify(data.packages ?? [], null, 2);
       $("minutil_penalty").value = (data.minutil_penalty ?? 10).toString();
 
       // Araç konumları state'i ve tablo
       window.__vehInitLoc = data.vehicle_initial_locations || {};
       renderVehicleLocationsTable();
+
+      // Paketleri forma dök
+      loadPackagesToForm(data.packages || []);
 
       refreshPreview();
       setStatus("Dataset yüklendi ✔️", "success");
@@ -298,6 +493,53 @@
     catch(e){ $("preview").textContent = "Önizleme derlenemedi:\n"+e.message; }
   }
 
+  // ====== Fotoğraftan paket çıkarma ======
+  async function extractPackagesFromPhoto(file){
+    if(!file) return;
+    try{
+      setStatus("Fotoğraf analiz ediliyor…", "info");
+      const fd = new FormData();
+      fd.append("image", file, file.name || "image.jpg");
+      // İsteğe bağlı: kullanıcı bağlamını da gönder
+      try{
+        const ctx = buildJSON();
+        fd.append("context", new Blob([JSON.stringify({ cities: ctx.cities })], {type: "application/json"}));
+      }catch(_){}
+
+      const res = await fetch("/vision/package-extract", { method:"POST", body: fd });
+      const raw = await res.text();
+      if(!(res.headers.get("content-type")||"").includes("application/json")) throw new Error("Beklenmeyen yanıt: "+raw.slice(0,200));
+      const data = JSON.parse(raw);
+      if(!res.ok || data.ok===false) throw new Error(data.error || "Görselden okuma başarısız.");
+
+      const list = Array.isArray(data.packages) ? data.packages : [];
+      if(!list.length){ setStatus("Fotoğraftan paket bulunamadı.", "warning"); return; }
+
+      // Gelen paketleri uygun şehir doğrulaması ile ekle
+      const citySet = new Set(getCities());
+      for(const p of list){
+        const np = {
+          id: String(p.id || nextPackageId()),
+          baslangic: citySet.has(p.baslangic) ? p.baslangic : ($("main_depot").value.trim() || Array.from(citySet)[0] || ""),
+          hedef:     citySet.has(p.hedef)     ? p.hedef     : ($("main_depot").value.trim() || Array.from(citySet)[0] || ""),
+          agirlik: Number(p.agirlik)||0,
+          ready: parseInt(p.ready,10)||1,
+          deadline_suresi: parseInt(p.deadline_suresi,10)||1,
+          ceza: Number(p.ceza)||0
+        };
+        // ID çakışıyorsa yeni ID öner
+        if(pkgState.items.some(x=>String(x.id)===np.id)){ np.id = nextPackageId(); }
+        pkgState.items.push(np);
+      }
+      renderPackageTable();
+      refreshPreview();
+      setStatus(`Fotoğraftan ${list.length} paket eklendi ✔️`, "success");
+    }catch(err){
+      console.error(err);
+      setStatus("Fotoğraftan ekleme hatası: "+err.message, "danger");
+    }
+  }
+
   // UI eventleri
   $("reloadBtn")?.addEventListener("click", loadDataset);
   $("refreshPreviewBtn")?.addEventListener("click", refreshPreview);
@@ -314,14 +556,25 @@
     }catch(e){ setStatus("JSON indirilemedi: "+e.message, "danger"); }
   });
 
+  // Paket Ekle
+  $("addPackageBtn")?.addEventListener("click", addEmptyPackage);
+
+  // Fotoğraftan Ekle
+  $("photoBtn")?.addEventListener("click", ()=> $("photoInput")?.click());
+  $("photoInput")?.addEventListener("change", (e)=> extractPackagesFromPhoto(e.target.files?.[0]));
+
   // Araç listesi değiştiğinde konum seçimlerini yeniden üret
   $("vehicle_count")?.addEventListener("input", ()=>{
-    // mevcut seçimleri sakla
     try{ window.__vehInitLoc = collectVehicleInitialLocations(); }catch(_){}
     renderVehicleLocationsTable();
   });
   // Şehir listesi ya da ana depo değişince seçenekleri/varsayılanları güncelle
-  $("cities")?.addEventListener("input", renderVehicleLocationsTable);
+  $("cities")?.addEventListener("input", ()=>{
+    renderVehicleLocationsTable();
+    // Şehirler değiştiyse paket dropdownlarını da güncelle
+    renderPackageTable();
+    refreshPreview();
+  });
   $("main_depot")?.addEventListener("input", renderVehicleLocationsTable);
 
   // Hepsini ana depoya set et
@@ -333,7 +586,6 @@
       const sel = $("vehloc_"+v);
       if(sel && depot) sel.value = depot;
     }
-    // state'i de güncelle
     window.__vehInitLoc = collectVehicleInitialLocations();
     refreshPreview();
   });
