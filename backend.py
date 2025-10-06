@@ -563,56 +563,25 @@ def _b64_from_filestorage(fs) -> str:
 
 
 def _build_vision_messages(img_b64: str, cities_ctx: Optional[List[str]]) -> List[Dict[str, Any]]:
-    schema_hint = {
-        "type": "json_schema",
-        "json_schema": {
-            "name": "package_list",
-            "schema": {
-                "type": "object",
-                "properties": {
-                    "packages": {
-                        "type": "array",
-                        "items": {
-                            "type": "object",
-                            "required": ["id", "baslangic", "hedef", "agirlik", "ready", "deadline_suresi", "ceza"],
-                            "properties": {
-                                "id": {"type": "string"},
-                                "baslangic": {"type": "string"},
-                                "hedef": {"type": "string"},
-                                "agirlik": {"type": "number"},
-                                "ready": {"type": "integer"},
-                                "deadline_suresi": {"type": "integer"},
-                                "ceza": {"type": "number"}
-                            },
-                            "additionalProperties": False
-                        }
-                    }
-                },
-                "required": ["packages"],
-                "additionalProperties": False
-            }
-        }
-    }
-
     cities_text = f"Geçerli şehirler: {', '.join(cities_ctx)}." if cities_ctx else "Şehirleri düz metinden yorumla."
     sys = (
         "Görüntüden sevkiyat etiketleri, irsaliyeler veya notlardan paket verilerini çıkar. "
-        "Türkçe alan adları kullan. ÇIKTIYI SADECE JSON olarak ver."
+        "ÇIKTIYI SADECE JSON olarak ver. Ek açıklama yazma."
     )
     user_text = (
         "İstenen alanlar: id, baslangic, hedef, agirlik, ready, deadline_suresi, ceza. "
-        f"{cities_text} Ağırlık kg, para TL, dönemler t biriminde. "
-        "Okuyamazsan tahmin etme; hiç paket döndürme."
+        f"{cities_text} Ağırlık kg, para TL, dönem t biriminde. "
+        "Okuyamazsan uydurma; boş dizi döndür. "
+        'Şema: {"packages":[{"id":"...","baslangic":"...","hedef":"...","agirlik":0,"ready":1,"deadline_suresi":5,"ceza":120}]}'
     )
 
     return [
-        {"role": "system", "content": [{"type": "text", "text": sys}, schema_hint]},
+        {"role": "system", "content": [{"type": "text", "text": sys}]},
         {"role": "user", "content": [
-            {"type": "input_image", "image_url": {"url": f"data:image/jpeg;base64,{img_b64}"}},
-            {"type": "text", "text": user_text}
+            {"type": "text", "text": user_text},
+            {"type": "image_url", "image_url": {"url": f"data:image/jpeg;base64,{img_b64}"}}
         ]}
     ]
-
 
 def _parse_vision_json(obj: Dict[str, Any]) -> List[Dict[str, Any]]:
     pkgs = obj.get("packages") or []
@@ -664,6 +633,7 @@ def vision_package_extract():
             messages=messages,
             temperature=0.0,
             max_tokens=400
+            response_format={"type": "json_object"}  # JSON zorlaması
         )
         raw = completion.choices[0].message.content or "{}"
 
@@ -854,3 +824,4 @@ def solve():
 if __name__ == "__main__":
     # Lokal test için:
     app.run(host="0.0.0.0", port=5000, debug=True)
+
