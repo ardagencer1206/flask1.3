@@ -1,11 +1,13 @@
 # -*- coding: utf-8 -*-
 import os
 import json
-from openai import AzureOpenAI
+import base64
 import traceback
-from typing import Dict, Any, List, Tuple
+from typing import Dict, Any, List, Tuple, Optional
 
 from flask import Flask, request, jsonify, send_from_directory
+from werkzeug.utils import secure_filename
+
 from pyomo.environ import (
     ConcreteModel, Set, Param, Var, Binary, NonNegativeReals, Objective, minimize,
     Constraint, Any as PyAny, value, SolverFactory
@@ -13,11 +15,14 @@ from pyomo.environ import (
 from pyomo.opt import TerminationCondition
 from pathlib import Path
 
+from openai import AzureOpenAI
+
 # Dataset yolu (env ile özelleştirilebilir)
 DATASET_PATH = Path(os.environ.get("DATASET_PATH", str(Path(__file__).parent / "dataset.json")))
 
 MAX_SOLVE_SECONDS = 26  # işlemciye verdiğimiz süre
 app = Flask(__name__, static_url_path="", static_folder=".")
+app.config["MAX_CONTENT_LENGTH"] = 12 * 1024 * 1024  # 12MB görsel limiti
 
 # ---------------- Azure OpenAI Ayarları ----------------
 AZURE_OPENAI_API_KEY = os.environ.get("AZURE_OPENAI_API_KEY", "d0167637046c4443badc4920cc612abb")
@@ -549,6 +554,137 @@ def extract_results(model: ConcreteModel, meta: Dict[str, Any]) -> Dict[str, Any
 
 
 # ------------------------------
+# Vision Yardımcıları ve Uç Noktası
+# ------------------------------
+def _b64_from_filestorage(fs) -> str:
+    _ = secure_filename(getattr(fs, "filename", "") or "image")
+    data = fs.read()
+    return base64.b64encode(data).decode("ascii")
+
+
+def _build_vision_messages(img_b64: str, cities_ctx: Optional[List[str]]) -> List[Dict[str, Any]]:
+    schema_hint = {
+        "type": "json_schema",
+        "json_schema": {
+            "name": "package_list",
+            "schema": {
+                "type": "object",
+                "properties": {
+                    "packages": {
+                        "type": "array",
+                        "items": {
+                            "type": "object",
+                            "required": ["id", "baslangic", "hedef", "agirlik", "ready", "deadline_suresi", "ceza"],
+                            "properties": {
+                                "id": {"type": "string"},
+                                "baslangic": {"type": "string"},
+                                "hedef": {"type": "string"},
+                                "agirlik": {"type": "number"},
+                                "ready": {"type": "integer"},
+                                "deadline_suresi": {"type": "integer"},
+                                "ceza": {"type": "number"}
+                            },
+                            "additionalProperties": False
+                        }
+                    }
+                },
+                "required": ["packages"],
+                "additionalProperties": False
+            }
+        }
+    }
+
+    cities_text = f"Geçerli şehirler: {', '.join(cities_ctx)}." if cities_ctx else "Şehirleri düz metinden yorumla."
+    sys = (
+        "Görüntüden sevkiyat etiketleri, irsaliyeler veya notlardan paket verilerini çıkar. "
+        "Türkçe alan adları kullan. ÇIKTIYI SADECE JSON olarak ver."
+    )
+    user_text = (
+        "İstenen alanlar: id, baslangic, hedef, agirlik, ready, deadline_suresi, ceza. "
+        f"{cities_text} Ağırlık kg, para TL, dönemler t biriminde. "
+        "Okuyamazsan tahmin etme; hiç paket döndürme."
+    )
+
+    return [
+        {"role": "system", "content": [{"type": "text", "text": sys}, schema_hint]},
+        {"role": "user", "content": [
+            {"type": "input_image", "image_url": {"url": f"data:image/jpeg;base64,{img_b64}"}},
+            {"type": "text", "text": user_text}
+        ]}
+    ]
+
+
+def _parse_vision_json(obj: Dict[str, Any]) -> List[Dict[str, Any]]:
+    pkgs = obj.get("packages") or []
+    out: List[Dict[str, Any]] = []
+    for p in pkgs:
+        try:
+            out.append({
+                "id": str(p["id"]),
+                "baslangic": str(p["baslangic"]),
+                "hedef": str(p["hedef"]),
+                "agirlik": float(p["agirlik"]),
+                "ready": int(p["ready"]),
+                "deadline_suresi": int(p["deadline_suresi"]),
+                "ceza": float(p["ceza"]),
+            })
+        except Exception:
+            continue
+    return out
+
+
+@app.post("/vision/package-extract")
+def vision_package_extract():
+    """
+    Multipart: image (zorunlu), context (opsiyonel JSON: {"cities":[...]})
+    Döner: { ok: true, packages: [ {...}, ... ] }
+    """
+    try:
+        if aoai_client is None:
+            return jsonify({"ok": False, "error": "Azure OpenAI istemcisi yok."}), 500
+
+        if "image" not in request.files:
+            return jsonify({"ok": False, "error": "image dosyası gerekli"}), 400
+
+        # bağlamdan şehirleri al (opsiyonel)
+        cities_ctx: Optional[List[str]] = None
+        if "context" in request.files:
+            try:
+                ctx = json.loads(request.files["context"].read().decode("utf-8"))
+                if isinstance(ctx, dict) and isinstance(ctx.get("cities"), list):
+                    cities_ctx = [str(c) for c in ctx.get("cities")]
+            except Exception:
+                cities_ctx = None
+
+        img_b64 = _b64_from_filestorage(request.files["image"])
+        messages = _build_vision_messages(img_b64, cities_ctx)
+
+        completion = aoai_client.chat.completions.create(
+            model=AZURE_DEPLOYMENT_NAME,
+            messages=messages,
+            temperature=0.0,
+            max_tokens=400
+        )
+        raw = completion.choices[0].message.content or "{}"
+
+        try:
+            obj = json.loads(raw)
+        except Exception:
+            start = raw.find("{")
+            end = raw.rfind("}")
+            if start >= 0 and end > start:
+                obj = json.loads(raw[start:end + 1])
+            else:
+                return jsonify({"ok": False, "error": "Model JSON döndürmedi."}), 502
+
+        packages = _parse_vision_json(obj)
+        return jsonify({"ok": True, "packages": packages})
+
+    except Exception as e:
+        return jsonify({"ok": False, "error": f"Hata: {str(e)}", "trace": traceback.format_exc()}), 500
+
+
+# ------------------------------
 # Routes
 # ------------------------------
 @app.route("/")
@@ -579,9 +715,9 @@ def dataset_endpoint():
 
         # Basit şema kontrolü
         required_keys = [
-            "cities","main_depot","periods",
-            "vehicle_types","vehicle_count",
-            "distances","packages","minutil_penalty"
+            "cities", "main_depot", "periods",
+            "vehicle_types", "vehicle_count",
+            "distances", "packages", "minutil_penalty"
         ]
         missing = [k for k in required_keys if k not in payload]
         if missing:
