@@ -473,7 +473,9 @@ def extract_results(model: ConcreteModel, meta: Dict[str, Any]) -> Dict[str, Any
                     for j in cities:
                         if i != j and value(model.y[p, vv, i, j, t]) > 0.5:
                             segs.append({"t": t, "from": i, "to": j, "vehicle": vv})
-
+                            
+        lat_hours = float(value(model.lateness[p]))
+        lat_pen   = float(value(model.LatePenalty[p])) * lat_hours
         summary = {
             "id": p,
             "origin": o,
@@ -485,8 +487,8 @@ def extract_results(model: ConcreteModel, meta: Dict[str, Any]) -> Dict[str, Any
             "on_time": (delivery_time is not None and delivery_time <= deadline),
             "passed_main_depot": passed_main,
             "route": sorted(segs, key=lambda s: s["t"]),
-            "lateness_hours": max(0, (delivery_time - deadline)) if delivery_time else None,
-            "lateness_penalty": float(value(model.LatePenalty[p])) * max(0, (delivery_time - deadline)) if delivery_time else 0.0
+            "lateness_hours": round(lat_hours, 6),
+            "lateness_penalty": lat_pen
         }
         package_summaries.append(summary)
 
@@ -749,4 +751,5 @@ def solve():
 
 if __name__ == "__main__":
     app.run(host="0.0.0.0", port=5000, debug=True)
+
 
