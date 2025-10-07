@@ -1,35 +1,75 @@
 {
-  "cities": ["İstanbul", "Ankara", "İzmir", "Bursa", "Eskişehir"],
+  "cities": ["İstanbul", "Ankara", "İzmir", "Bursa", "Eskişehir", "Konya", "Kocaeli", "Adapazarı"],
   "main_depot": "İstanbul",
   "periods": 6,
   "vehicle_types": {
-    "Küçük": { "kapasite": 200, "maliyet_km": 2.5, "sabit_maliyet": 150, "min_doluluk": 0.40 },
-    "Orta":  { "kapasite": 420, "maliyet_km": 4.1, "sabit_maliyet": 320, "min_doluluk": 0.45 }
+    "Küçük":   { "kapasite": 200, "maliyet_km": 2.5, "sabit_maliyet": 150, "min_doluluk": 0.40 },
+    "Orta":    { "kapasite": 420, "maliyet_km": 4.1, "sabit_maliyet": 320, "min_doluluk": 0.45 },
+    "Büyük":   { "kapasite": 800, "maliyet_km": 6.0, "sabit_maliyet": 600, "min_doluluk": 0.50 },
+    "Soğutmalı": { "kapasite": 300, "maliyet_km": 5.5, "sabit_maliyet": 450, "min_doluluk": 0.50 }
   },
   "vehicle_count": {
-    "Küçük": 2,
-    "Orta": 1
+    "Küçük": 3,
+    "Orta": 2,
+    "Büyük": 1,
+    "Soğutmalı": 1
   },
   "vehicle_initial_locations": {
     "Küçük_1": "Ankara",
     "Küçük_2": "Bursa",
-    "Orta_1":  "Eskişehir"
+    "Küçük_3": "Kocaeli",
+    "Orta_1":  "Eskişehir",
+    "Orta_2":  "İzmir",
+    "Büyük_1": "İstanbul",
+    "Soğutmalı_1": "Adapazarı"
   },
   "distances": [
     ["İstanbul","Ankara",450],
     ["İstanbul","İzmir",330],
     ["İstanbul","Bursa",150],
     ["İstanbul","Eskişehir",325],
+    ["İstanbul","Konya",700],
+    ["İstanbul","Kocaeli",110],
+    ["İstanbul","Adapazarı",150],
     ["Ankara","İzmir",590],
     ["Ankara","Bursa",390],
     ["Ankara","Eskişehir",230],
+    ["Ankara","Konya",260],
+    ["Ankara","Kocaeli",350],
+    ["Ankara","Adapazarı",310],
     ["İzmir","Bursa",330],
     ["İzmir","Eskişehir",410],
-    ["Bursa","Eskişehir",150]
+    ["İzmir","Konya",540],
+    ["İzmir","Kocaeli",440],
+    ["İzmir","Adapazarı",470],
+    ["Bursa","Eskişehir",150],
+    ["Bursa","Konya",520],
+    ["Bursa","Kocaeli",130],
+    ["Bursa","Adapazarı",160],
+    ["Eskişehir","Konya",320],
+    ["Eskişehir","Kocaeli",240],
+    ["Eskişehir","Adapazarı",220],
+    ["Konya","Kocaeli",500],
+    ["Konya","Adapazarı",480],
+    ["Kocaeli","Adapazarı",40]
   ],
   "packages": [
-    {"id":"P1","baslangic":"Ankara","hedef":"İzmir","agirlik":120,"ready":1,"deadline_suresi":5,"ceza":120},
-    {"id":"P2","baslangic":"İzmir","hedef":"Ankara","agirlik":90,"ready":1,"deadline_suresi":5,"ceza":120}
+    {"id":"P1","baslangic":"Ankara","hedef":"İzmir","agirlik":120,"ready":1,"deadline_suresi":5,"ceza":140},
+    {"id":"P2","baslangic":"İzmir","hedef":"Ankara","agirlik":90,"ready":1,"deadline_suresi":4,"ceza":130},
+    {"id":"P3","baslangic":"Bursa","hedef":"Eskişehir","agirlik":150,"ready":2,"deadline_suresi":3,"ceza":200},
+    {"id":"P4","baslangic":"İstanbul","hedef":"Bursa","agirlik":80,"ready":1,"deadline_suresi":2,"ceza":80},
+    {"id":"P5","baslangic":"Eskişehir","hedef":"İstanbul","agirlik":210,"ready":3,"deadline_suresi":2,"ceza":260},
+    {"id":"P6","baslangic":"Ankara","hedef":"Bursa","agirlik":180,"ready":2,"deadline_suresi":4,"ceza":150},
+    {"id":"P7","baslangic":"Kocaeli","hedef":"Ankara","agirlik":140,"ready":1,"deadline_suresi":3,"ceza":160},
+    {"id":"P8","baslangic":"Adapazarı","hedef":"İzmir","agirlik":190,"ready":2,"deadline_suresi":4,"ceza":180},
+    {"id":"P9","baslangic":"Konya","hedef":"İstanbul","agirlik":260,"ready":2,"deadline_suresi":3,"ceza":220},
+    {"id":"P10","baslangic":"İstanbul","hedef":"Kocaeli","agirlik":70,"ready":1,"deadline_suresi":2,"ceza":70},
+    {"id":"P11","baslangic":"İzmir","hedef":"Bursa","agirlik":200,"ready":3,"deadline_suresi":2,"ceza":190},
+    {"id":"P12","baslangic":"Eskişehir","hedef":"Konya","agirlik":170,"ready":2,"deadline_suresi":3,"ceza":170},
+    {"id":"P13","baslangic":"Bursa","hedef":"Adapazarı","agirlik":110,"ready":1,"deadline_suresi":2,"ceza":120},
+    {"id":"P14","baslangic":"Kocaeli","hedef":"İzmir","agirlik":230,"ready":1,"deadline_suresi":5,"ceza":210},
+    {"id":"P15","baslangic":"Ankara","hedef":"Eskişehir","agirlik":95,"ready":4,"deadline_suresi":2,"ceza":140},
+    {"id":"P16","baslangic":"Adapazarı","hedef":"Konya","agirlik":160,"ready":2,"deadline_suresi":3,"ceza":160}
   ],
   "minutil_penalty": 12.0
 }
