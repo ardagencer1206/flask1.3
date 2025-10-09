@@ -1,4 +1,4 @@
-# -*- coding: utf-8 -*- 
+# -*- coding: utf-8 -*-  
 import os
 import json
 import base64
@@ -209,6 +209,9 @@ def build_model(payload: Dict[str, Any]) -> Tuple[ConcreteModel, Dict[str, Any]]
     model.lateness = Var(model.Packages, domain=NonNegativeReals)
     model.minutil_shortfall = Var(model.Vehicles, model.Periods, domain=NonNegativeReals)
 
+    # --- (Yeni) Paket ana depodan geçti mi? (binary)
+    model.pass_main = Var(model.Packages, domain=Binary)
+
     def objective_rule(m):
         transport = sum(
             m.TransportCost[v] * m.Distance[i, j] * m.x[v, i, j, t]
@@ -221,16 +224,19 @@ def build_model(payload: Dict[str, Any]) -> Tuple[ConcreteModel, Dict[str, Any]]
 
     model.obj = Objective(rule=objective_rule, sense=minimize)
 
+    # 1) Origin'den tam 1 çıkış (ready'den sonra)
     def package_origin_rule(m, p):
         o, r = m.PackageOrigin[p], m.PackageReady[p]
         return sum(m.y[p, v, o, j, t] for v in m.Vehicles for j in m.Cities for t in m.Periods if j != o and t >= r) == 1
     model.package_origin_constraint = Constraint(model.Packages, rule=package_origin_rule)
 
+    # 2) Hedefe tam 1 varış
     def package_destination_rule(m, p):
         d = m.PackageDest[p]
         return sum(m.y[p, v, i, d, t] for v in m.Vehicles for i in m.Cities for t in m.Periods if i != d) == 1
     model.package_destination_constraint = Constraint(model.Packages, rule=package_destination_rule)
 
+    # 3) Ana depodan en az bir geçiş (origin/dest depo değilse)
     def main_depot_rule(m, p):
         o, d = m.PackageOrigin[p], m.PackageDest[p]
         if o == main_depot or d == main_depot:
@@ -240,33 +246,35 @@ def build_model(payload: Dict[str, Any]) -> Tuple[ConcreteModel, Dict[str, Any]]
         return through >= 1
     model.main_depot_constraint = Constraint(model.Packages, rule=main_depot_rule)
 
+    # 4) Paket ancak araç gidiyorsa taşınır
     def y_le_x_rule(m, p, v, i, j, t):
         if i == j:
             return Constraint.Skip
         return m.y[p, v, i, j, t] <= m.x[v, i, j, t]
     model.package_vehicle_link = Constraint(model.Packages, model.Vehicles, model.Cities, model.Cities, model.Periods, rule=y_le_x_rule)
 
+    # 5) Kapasite
     def capacity_rule(m, v, i, j, t):
         if i == j:
             return Constraint.Skip
         return sum(m.PackageWeight[p] * m.y[p, v, i, j, t] for p in m.Packages) <= m.VehicleCapacity[v]
     model.capacity_constraint = Constraint(model.Vehicles, model.Cities, model.Cities, model.Periods, rule=capacity_rule)
 
-    # === (GÜNCEL) Min. doluluk cezası: TÜM hareketler için (periyot başına) ===
+    # 6) (GÜNCEL) Min. doluluk cezası: tüm hareketler (periyot bazında)
     def min_utilization_soft_rule(m, v, t):
-        # t periyodunda v aracının taşıdığı toplam yük (hangi i→j olursa olsun)
         loaded = sum(m.PackageWeight[p] * m.y[p, v, i, j, t]
                      for p in m.Packages for i in m.Cities for j in m.Cities if i != j)
-        # araç hareket ediyorsa hedef = min_doluluk * kapasite, etmiyorsa 0
         target = m.MinUtilization[v] * m.VehicleCapacity[v] * \
                  sum(m.x[v, i, j, t] for i in m.Cities for j in m.Cities if i != j)
         return loaded + m.minutil_shortfall[v, t] >= target
     model.min_utilization_soft = Constraint(model.Vehicles, model.Periods, rule=min_utilization_soft_rule)
 
+    # 7) Paket konumu: her t’de tek şehir
     def pkg_onehot_rule(m, p, t):
         return sum(m.pkg_loc[p, n, t] for n in m.Cities) == 1
     model.pkg_location_onehot = Constraint(model.Packages, model.Periods, rule=pkg_onehot_rule)
 
+    # 8) Ready öncesi origin kilidi ve t=ready’de origin
     def pkg_before_ready_origin_rule(m, p, t):
         o, r = m.PackageOrigin[p], m.PackageReady[p]
         if t < r:
@@ -293,6 +301,7 @@ def build_model(payload: Dict[str, Any]) -> Tuple[ConcreteModel, Dict[str, Any]]
         return Constraint.Skip
     model.pkg_at_ready_others_zero = Constraint(model.Packages, model.Cities, rule=pkg_at_ready_others_zero_rule)
 
+    # 9) Paket konum geçişi
     def pkg_loc_transition_rule(m, p, n, t):
         if t == periods:
             return Constraint.Skip
@@ -301,16 +310,19 @@ def build_model(payload: Dict[str, Any]) -> Tuple[ConcreteModel, Dict[str, Any]]
         return m.pkg_loc[p, n, t] + incoming - outgoing == m.pkg_loc[p, n, t + 1]
     model.pkg_location_transition = Constraint(model.Packages, model.Cities, model.Periods, rule=pkg_loc_transition_rule)
 
+    # 10) Çıkış mümkünse o anda orada ol
     def pkg_departure_feasible_rule(m, p, i, t):
         return sum(m.y[p, v, i, j, t] for v in m.Vehicles for j in m.Cities if j != i) <= m.pkg_loc[p, i, t]
     model.pkg_departure_feasible = Constraint(model.Packages, model.Cities, model.Periods, rule=pkg_departure_feasible_rule)
 
+    # 11) Varıştan sonra t+1’de hedefte ol
     def pkg_arrival_feasible_rule(m, p, j, t):
         if t == periods:
             return Constraint.Skip
         return sum(m.y[p, v, i, j, t] for v in m.Vehicles for i in m.Cities if i != j) <= m.pkg_loc[p, j, t + 1]
     model.pkg_arrival_feasible = Constraint(model.Packages, model.Cities, model.Periods, rule=pkg_arrival_feasible_rule)
 
+    # 12) Ara şehir akış korunumu
     def flow_conservation_rule(m, p, k):
         o, d = m.PackageOrigin[p], m.PackageDest[p]
         if k == o or k == d:
@@ -320,23 +332,28 @@ def build_model(payload: Dict[str, Any]) -> Tuple[ConcreteModel, Dict[str, Any]]
         return inflow == outflow
     model.flow_conservation = Constraint(model.Packages, model.Cities, rule=flow_conservation_rule)
 
+    # 13) Araç kullanım takibi
     def vehicle_usage_rule(m, v, t):
         moves = sum(m.x[v, i, j, t] for i in m.Cities for j in m.Cities if i != j)
         return m.z[v, t] >= moves
     model.vehicle_usage = Constraint(model.Vehicles, model.Periods, rule=vehicle_usage_rule)
 
+    # 14) Araç: periyot başına tek hareket
     def vehicle_one_move_rule(m, v, t):
         return sum(m.x[v, i, j, t] for i in m.Cities for j in m.Cities if i != j) <= 1
     model.vehicle_route_out = Constraint(model.Vehicles, model.Periods, rule=vehicle_one_move_rule)
 
+    # 15) Araç başlangıç konumu
     def vehicle_initial_loc_rule(m, v):
         return m.loc[v, init_loc[v], 1] == 1
     model.vehicle_initial_location = Constraint(model.Vehicles, rule=vehicle_initial_loc_rule)
 
+    # 16) Araç: her t’de tek şehir
     def vehicle_loc_onehot_rule(m, v, t):
         return sum(m.loc[v, n, t] for n in m.Cities) == 1
     model.vehicle_location_exists = Constraint(model.Vehicles, model.Periods, rule=vehicle_loc_onehot_rule)
 
+    # 17) Araç konum geçişi
     def vehicle_loc_transition_rule(m, v, n, t):
         if t == periods:
             return Constraint.Skip
@@ -345,11 +362,13 @@ def build_model(payload: Dict[str, Any]) -> Tuple[ConcreteModel, Dict[str, Any]]
         return m.loc[v, n, t] + incoming - outgoing == m.loc[v, n, t + 1]
     model.vehicle_location_transition = Constraint(model.Vehicles, model.Cities, model.Periods, rule=vehicle_loc_transition_rule)
 
+    # 18) Araç sadece bulunduğu şehirden ayrılabilir
     def vehicle_move_from_loc_rule(m, v, i, t):
         outgoing = sum(m.x[v, i, j, t] for j in m.Cities if j != i)
         return outgoing <= m.loc[v, i, t]
     model.movement_from_location = Constraint(model.Vehicles, model.Cities, model.Periods, rule=vehicle_move_from_loc_rule)
 
+    # 19) Gecikme tanımı
     def lateness_rule(m, p):
         d = m.PackageDest[p]
         delivery_t = sum(tt * m.y[p, v, i, d, tt] for v in m.Vehicles for i in m.Cities for tt in m.Periods if i != d)
@@ -357,17 +376,46 @@ def build_model(payload: Dict[str, Any]) -> Tuple[ConcreteModel, Dict[str, Any]]
         return m.lateness[p] >= delivery_t - deadline
     model.lateness_calc = Constraint(model.Packages, rule=lateness_rule)
 
+    # 20) Aynı paket aynı i→j segmentini toplamda ≤1
     def package_once_segment_rule(m, p, i, j):
         if i == j:
             return Constraint.Skip
         return sum(m.y[p, v, i, j, t] for v in m.Vehicles for t in m.Periods) <= 1
     model.package_once_per_segment = Constraint(model.Packages, model.Cities, model.Cities, rule=package_once_segment_rule)
 
+    # 21) Hazır olmadan origin'den çıkamaz
     def package_ready_time_rule(m, p, v, i, j, t):
         if i == j or i != m.PackageOrigin[p]:
             return Constraint.Skip
         return m.y[p, v, i, j, t] * t >= m.y[p, v, i, j, t] * m.PackageReady[p]
     model.package_ready_time = Constraint(model.Packages, model.Vehicles, model.Cities, model.Cities, model.Periods, rule=package_ready_time_rule)
+
+    # ---- (Yeni) pass_main tanımı ----
+    def pass_main_upper_rule(m, p):
+        term = sum(m.y[p, v, main_depot, j, t] for v in m.Vehicles for j in m.Cities for t in m.Periods if j != main_depot) \
+             + sum(m.y[p, v, i, main_depot, t] for v in m.Vehicles for i in m.Cities for t in m.Periods if i != main_depot)
+        return m.pass_main[p] <= term
+    model.pass_main_upper = Constraint(model.Packages, rule=pass_main_upper_rule)
+
+    def pass_main_lower_out_rule(m, p, v, j, t):
+        if j == main_depot:
+            return Constraint.Skip
+        return m.pass_main[p] >= m.y[p, v, main_depot, j, t]
+    model.pass_main_lower_out = Constraint(model.Packages, model.Vehicles, model.Cities, model.Periods, rule=pass_main_lower_out_rule)
+
+    def pass_main_lower_in_rule(m, p, v, i, t):
+        if i == main_depot:
+            return Constraint.Skip
+        return m.pass_main[p] >= m.y[p, v, i, main_depot, t]
+    model.pass_main_lower_in = Constraint(model.Packages, model.Vehicles, model.Cities, model.Periods, rule=pass_main_lower_in_rule)
+
+    # ---- (Yeni) Koşullu hedef emici: pass_main==1 ise hedefte kalış azalamaz
+    def dest_stay_if_passed_rule(m, p, t):
+        if t == periods:
+            return Constraint.Skip
+        d = m.PackageDest[p]
+        return m.pkg_loc[p, d, t] - m.pkg_loc[p, d, t + 1] <= 1 - m.pass_main[p]
+    model.dest_stay_if_passed = Constraint(model.Packages, model.Periods, rule=dest_stay_if_passed_rule)
 
     meta = {
         "cities": cities,
@@ -459,16 +507,7 @@ def extract_results(model: ConcreteModel, meta: Dict[str, Any]) -> Dict[str, Any
                 delivery_time = t
                 break
 
-        passed_main = False
-        main_depot = meta["main_depot"]
-        for v in model.Vehicles:
-            for t in periods:
-                if (sum(value(model.y[p, v, main_depot, j, t]) for j in cities if j != main_depot) > 0.5 or
-                        sum(value(model.y[p, v, i, main_depot, t]) for i in cities if i != main_depot) > 0.5):
-                    passed_main = True
-                    break
-            if passed_main:
-                break
+        passed_main = (value(model.pass_main[p]) > 0.5)
 
         segs = []
         for t in periods:
@@ -552,10 +591,6 @@ def _parse_vision_json(obj: Dict[str, Any]) -> List[Dict[str, Any]]:
 
 @app.post("/vision/package-extract")
 def vision_package_extract():
-    """
-    Multipart: image (zorunlu), context (opsiyonel JSON: {"cities":[...]})
-    Döner: { ok: true, packages: [ {...}, ... ] }
-    """
     try:
         if aoai_client is None:
             return jsonify({"ok": False, "error": "Azure OpenAI istemcisi yok."}), 500
@@ -580,7 +615,7 @@ def vision_package_extract():
             messages=messages,
             temperature=0.0,
             max_tokens=400,
-            response_format={"type": "json_object"}  # JSON zorlaması
+            response_format={"type": "json_object"}
         )
         raw = completion.choices[0].message.content or "{}"
 
@@ -727,9 +762,9 @@ def solve():
                 for _, v in m.x.items():
                     if v.value is not None:
                         return True
+                return False
             except Exception:
-                pass
-            return False
+                return False
 
         diag = {
             "termination": str(term),
