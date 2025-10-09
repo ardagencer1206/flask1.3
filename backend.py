@@ -1,4 +1,4 @@
-# -*- coding: utf-8 -*-
+# -*- coding: utf-8 -*- 
 import os
 import json
 import base64
@@ -252,10 +252,14 @@ def build_model(payload: Dict[str, Any]) -> Tuple[ConcreteModel, Dict[str, Any]]
         return sum(m.PackageWeight[p] * m.y[p, v, i, j, t] for p in m.Packages) <= m.VehicleCapacity[v]
     model.capacity_constraint = Constraint(model.Vehicles, model.Cities, model.Cities, model.Periods, rule=capacity_rule)
 
+    # === (GÜNCEL) Min. doluluk cezası: TÜM hareketler için (periyot başına) ===
     def min_utilization_soft_rule(m, v, t):
-        departures = sum(m.x[v, main_depot, j, t] for j in m.Cities if j != main_depot)
-        loaded = sum(m.PackageWeight[p] * m.y[p, v, main_depot, j, t] for p in m.Packages for j in m.Cities if j != main_depot)
-        target = m.MinUtilization[v] * m.VehicleCapacity[v] * departures
+        # t periyodunda v aracının taşıdığı toplam yük (hangi i→j olursa olsun)
+        loaded = sum(m.PackageWeight[p] * m.y[p, v, i, j, t]
+                     for p in m.Packages for i in m.Cities for j in m.Cities if i != j)
+        # araç hareket ediyorsa hedef = min_doluluk * kapasite, etmiyorsa 0
+        target = m.MinUtilization[v] * m.VehicleCapacity[v] * \
+                 sum(m.x[v, i, j, t] for i in m.Cities for j in m.Cities if i != j)
         return loaded + m.minutil_shortfall[v, t] >= target
     model.min_utilization_soft = Constraint(model.Vehicles, model.Periods, rule=min_utilization_soft_rule)
 
@@ -473,9 +477,9 @@ def extract_results(model: ConcreteModel, meta: Dict[str, Any]) -> Dict[str, Any
                     for j in cities:
                         if i != j and value(model.y[p, vv, i, j, t]) > 0.5:
                             segs.append({"t": t, "from": i, "to": j, "vehicle": vv})
-                            
         lat_hours = float(value(model.lateness[p]))
         lat_pen   = float(value(model.LatePenalty[p])) * lat_hours
+
         summary = {
             "id": p,
             "origin": o,
@@ -751,5 +755,3 @@ def solve():
 
 if __name__ == "__main__":
     app.run(host="0.0.0.0", port=5000, debug=True)
-
-
