@@ -129,8 +129,8 @@ def pick_solver():
                         s.options["tmlim"] = int(MAX_SOLVE_SECONDS)
                     elif cand == "cplex":
                         s.options["timelimit"] = MAX_SOLVE_SECONDS
-                        s.options["mipgap"] = 0.05
-                        s.options["threads"] = 2
+                        s.options["mipgap"] = 0.20
+                        s.options["threads"] = 4
                 except Exception:
                     pass
                 return cand, s, False
@@ -790,5 +790,6 @@ def solve():
 
 if __name__ == "__main__":
     app.run(host="0.0.0.0", port=5000, debug=True)
+
 
 
